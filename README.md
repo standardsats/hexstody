@@ -1,6 +1,11 @@
 # How to build
 You need to run local PostgreSQL instance to allow compiler to check SQL quieries in advance:
-1. Create `hexstody` user with `hexstody` password and allow to create databases for tests:
+1. Install `sqlx-cli` tool via
+```shell
+cargo install sqlx-cli
+```
+The [sqlx-cli project](https://github.com/launchbadge/sqlx/blob/main/sqlx-cli/README.md) itself.
+2. Create `hexstody` user with `hexstody` password and allow to create databases for tests:
 ```
 create role hexstody login createdb password 'hexstody';
 create database hexstody owner hexstody;
