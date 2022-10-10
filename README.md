@@ -15,6 +15,18 @@ create database hexstody owner hexstody;
 ```
 export DATABASE_URL=postgresql://hexstody:hexstody@localhost:5432/hexstody
 ```
+4. Add `bitcoind` into `$PATH` directory
+5. Check tooling availability
+
+Postgres tool for database initialization:
+```shell
+which initdb
+```
+
+Bitcoin Core daemon:
+```shell
+which bitcoind
+```
 
 How to build and run:
 
@@ -22,6 +34,8 @@ Tests
 ```
 cargo test
 ```
+
+__Important__: if tests failed, clean `rm -rf /tmp/hexstody` before giving another try.
 
 Operator key generation tool
 ```
