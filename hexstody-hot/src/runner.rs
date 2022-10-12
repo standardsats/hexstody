@@ -2,6 +2,9 @@ use figment::Figment;
 use futures::future::{join3, AbortHandle, AbortRegistration, Abortable, Aborted};
 use futures::Future;
 use hexstody_eth_client::client::EthClient;
+use hexstody_runtime_db::RuntimeState;
+use hexstody_ticker::worker::ticker_worker;
+use hexstody_ticker_provider::client::TickerClient;
 use log::*;
 use p256::pkcs8::DecodePublicKey;
 use p256::PublicKey;
@@ -97,7 +100,8 @@ impl ApiConfig {
             .merge(("port", public_api_port))
             .merge(("static_path", public_api_static_path))
             .merge(("template_dir", public_api_template_path))
-            .merge(("secret_key", public_api_secret_key));
+            .merge(("secret_key", public_api_secret_key))
+            .merge(("network", args.network.clone()));
 
         let operator_api_enabled = if args.operator_api_enabled {
             true
@@ -141,7 +145,8 @@ impl ApiConfig {
             .merge(("port", operator_api_port))
             .merge(("static_path", operator_api_static_path))
             .merge(("template_dir", operator_api_template_path))
-            .merge(("secret_key", operator_api_secret_key));
+            .merge(("secret_key", operator_api_secret_key))
+            .merge(("network", args.network.clone()));
 
         ApiConfig {
             public_api_config: public_api_figment,
@@ -173,17 +178,18 @@ async fn serve_abortable<F, Fut, Out>(
 async fn serve_api(
     pool: Pool,
     state_mx: Arc<Mutex<State>>,
+    runtime_state_mx: Arc<Mutex<RuntimeState>>,
     state_notify: Arc<Notify>,
     start_notify: Arc<Notify>,
     update_sender: mpsc::Sender<StateUpdate>,
     btc_client: BtcClient,
     eth_client: EthClient,
+    ticker_client: TickerClient,
     api_type: ApiType,
     api_config: Figment,
     abort_reg: AbortRegistration,
-    is_test: bool
-) -> ()
-{
+    is_test: bool,
+) -> () {
     let api_enabled: bool = api_config.extract_inner("api_enabled").unwrap();
     if !api_enabled {
         info!("{api_type} API disabled");
@@ -196,11 +202,13 @@ async fn serve_api(
                 hexstody_public::api::serve_api(
                     pool.clone(),
                     state_mx.clone(),
+                    runtime_state_mx.clone(),
                     state_notify.clone(),
                     start_notify.clone(),
                     update_sender.clone(),
                     btc_client,
                     eth_client,
+                    ticker_client,
                     api_config,
                     is_test,
                 )
@@ -212,11 +220,13 @@ async fn serve_api(
                 hexstody_operator::api::serve_api(
                     pool.clone(),
                     state_mx.clone(),
+                    runtime_state_mx.clone(),
                     state_notify.clone(),
                     start_notify.clone(),
                     update_sender.clone(),
                     btc_client,
                     eth_client,
+                    ticker_client,
                     api_config,
                 )
             })
@@ -228,6 +238,7 @@ async fn serve_api(
 pub async fn serve_apis(
     pool: Pool,
     state_mx: Arc<Mutex<State>>,
+    runtime_state_mx: Arc<Mutex<RuntimeState>>,
     state_notify: Arc<Notify>,
     start_notify: Arc<Notify>,
     api_config: ApiConfig,
@@ -235,9 +246,9 @@ pub async fn serve_apis(
     update_sender: mpsc::Sender<StateUpdate>,
     btc_client: BtcClient,
     eth_client: EthClient,
+    ticker_client: TickerClient,
     is_test: bool,
-) -> Result<(), Aborted>
-{
+) -> Result<(), Aborted> {
     let public_start = Arc::new(Notify::new());
     let operator_start = Arc::new(Notify::new());
 
@@ -245,36 +256,41 @@ pub async fn serve_apis(
     let public_api_fut = serve_api(
         pool.clone(),
         state_mx.clone(),
+        runtime_state_mx.clone(),
         state_notify.clone(),
         public_start.clone(),
         update_sender.clone(),
         btc_client.clone(),
         eth_client.clone(),
+        ticker_client.clone(),
         ApiType::Public,
         api_config.public_api_config,
         public_abort_reg,
-        is_test
+        is_test,
     );
     let (operator_handle, operator_abort_reg) = AbortHandle::new_pair();
     let operator_api_fut = serve_api(
         pool,
         state_mx,
+        runtime_state_mx.clone(),
         state_notify,
         operator_start.clone(),
         update_sender.clone(),
         btc_client.clone(),
         eth_client.clone(),
+        ticker_client.clone(),
         ApiType::Operator,
         api_config.operator_api_config,
         operator_abort_reg,
-        is_test
+        is_test,
     );
     let body_fut = async move {
         public_start.notified().await;
         operator_start.notified().await;
         start_notify.notify_one();
     };
-    let abortable_apis = Abortable::new(join3(public_api_fut, operator_api_fut, body_fut), api_abort);
+    let abortable_apis =
+        Abortable::new(join3(public_api_fut, operator_api_fut, body_fut), api_abort);
     if let Err(Aborted) = abortable_apis.await {
         public_handle.abort();
         operator_handle.abort();
@@ -300,15 +316,16 @@ pub async fn run_hot_wallet(
     start_notify: Arc<Notify>,
     btc_client: BtcClient,
     eth_client: EthClient,
+    ticker_client: TickerClient,
     api_abort_reg: AbortRegistration,
     is_test: bool,
-) -> Result<(), Error> 
-{
+) -> Result<(), Error> {
     info!("Connecting to database");
     let pool = create_db_pool(&args.dbconnect).await?;
     info!("Reconstructing state from database");
     let state = query_state(args.network, &pool).await?;
     let state_mx = Arc::new(Mutex::new(state));
+    let runtime_state_mx = Arc::new(Mutex::new(RuntimeState::new()));
     let state_notify = Arc::new(Notify::new());
     let (update_sender, update_receiver) = mpsc::channel(1000);
     let (update_resp_sender, update_resp_receiver) = mpsc::channel(1000);
@@ -319,7 +336,14 @@ pub async fn run_hot_wallet(
         let state_mx = state_mx.clone();
         let state_notify = state_notify.clone();
         async move {
-            update_worker(pool, state_mx, state_notify, update_receiver, update_resp_sender).await;
+            update_worker(
+                pool,
+                state_mx,
+                state_notify,
+                update_receiver,
+                update_resp_sender,
+            )
+            .await;
         }
     });
     let btc_worker_hndl = tokio::spawn({
@@ -334,20 +358,35 @@ pub async fn run_hot_wallet(
     let update_response_hndl = tokio::spawn({
         let state_mx = state_mx.clone();
         let btc_client = btc_client.clone();
+        let eth_client = eth_client.clone();
         let update_sender = update_sender.clone();
         async move {
-            update_results_worker(btc_client, state_mx, update_resp_receiver, update_sender).await;
-        }    
+            update_results_worker(
+                btc_client,
+                eth_client,
+                state_mx,
+                update_resp_receiver,
+                update_sender,
+            )
+            .await;
+        }
     });
 
     let cron_workers_hndl = tokio::spawn({
         let update_sender = update_sender.clone();
-        async move { cron_workers(update_sender) }
+        async move { cron_workers(update_sender).await }
+    });
+
+    let ticker_worker_hndl = tokio::spawn({
+        let ticker_client = ticker_client.clone();
+        let runtime_state_mx = runtime_state_mx.clone();
+        async move { ticker_worker(ticker_client, runtime_state_mx).await }
     });
 
     if let Err(Aborted) = serve_apis(
         pool,
         state_mx,
+        runtime_state_mx,
         state_notify,
         start_notify,
         api_config,
@@ -355,7 +394,8 @@ pub async fn run_hot_wallet(
         update_sender,
         btc_client,
         eth_client,
-        is_test
+        ticker_client,
+        is_test,
     )
     .await
     {
@@ -364,6 +404,7 @@ pub async fn run_hot_wallet(
         btc_worker_hndl.abort();
         update_response_hndl.abort();
         cron_workers_hndl.abort();
+        ticker_worker_hndl.abort();
         Err(Error::Aborted)
     } else {
         Ok(())

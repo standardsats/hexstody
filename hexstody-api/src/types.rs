@@ -1,12 +1,18 @@
+use std::fmt;
+
 use base64;
 use chrono::NaiveDateTime;
 use hexstody_btc_api::bitcoin::txid::BtcTxid;
 use okapi::openapi3::*;
 use p256::{ecdsa::Signature, pkcs8::DecodePublicKey, PublicKey};
 use rocket::{
-    http::Status,
+    http::{
+        uri::fmt::{Formatter, FromUriParam, Query, UriDisplay},
+        Status,
+    },
     request::{FromRequest, Outcome, Request},
     serde::json::json,
+    FromFormField,
 };
 use rocket_okapi::{
     gen::OpenApiGenerator,
@@ -16,7 +22,7 @@ use rocket_okapi::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::CurrencyTxId;
+use crate::domain::{CurrencyTxId, Email, PhoneNumber, TgName};
 
 use super::domain::currency::{BtcAddress, Currency, CurrencyAddress, Erc20Token};
 
@@ -140,6 +146,16 @@ pub struct UserData {
     pub balanceTokens: Vec<Erc20TokenBalance>,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInfo {
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub email: Option<Email>,
+    pub phone: Option<PhoneNumber>,
+    pub tg_name: Option<TgName>,
+}
+
 #[allow(non_snake_case)]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Erc20TokenBalance {
@@ -172,11 +188,23 @@ pub struct EthGasPrice {
     pub gasUsedRatio: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
 pub struct BalanceItem {
     pub currency: Currency,
     pub value: u64,
     pub limit_info: LimitInfo,
+}
+
+impl PartialOrd for BalanceItem {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.currency.partial_cmp(&other.currency)
+    }
+}
+
+impl Ord for BalanceItem {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.currency.cmp(&other.currency)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -196,7 +224,7 @@ pub struct WithdrawalHistoryItem {
     pub value: u64,
     pub status: WithdrawalRequestStatus,
     //temp field to give txid for ETH and tokens while status not working
-    pub txid: Option<CurrencyTxId>, 
+    pub txid: Option<CurrencyTxId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -252,6 +280,8 @@ pub struct PasswordChange {
 }
 
 /// Auxiliary data type to display `WithdrawalRequest` on the page
+// NOTE: fields order must be the same as in 'ConfirmationData' struct
+// otherwise signature verification will fail
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct WithdrawalRequest {
     /// Request ID
@@ -280,6 +310,8 @@ pub struct UserWithdrawRequest {
     pub amount: u64,
 }
 
+// NOTE: fields order must be the same as in 'WithdrawalRequest' struct
+// otherwise signature verification will fail
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ConfirmationData {
     /// Withdrawal request ID
@@ -352,6 +384,43 @@ pub enum WithdrawalRequestStatus {
         /// Node
         reason: String,
     },
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, JsonSchema, FromFormField)]
+pub enum WithdrawalFilter {
+    All,
+    Pending,
+    Confirmed,
+    Completed,
+    OpRejected,
+    NodeRejected
+}
+
+impl ToString for WithdrawalFilter {
+    fn to_string(&self) -> String {
+        match self {
+            WithdrawalFilter::All => "all".to_owned(),
+            WithdrawalFilter::Pending => "pending".to_owned(),
+            WithdrawalFilter::Confirmed => "confirmed".to_owned(),
+            WithdrawalFilter::Completed => "completed".to_owned(),
+            WithdrawalFilter::OpRejected => "oprejected".to_owned(),
+            WithdrawalFilter::NodeRejected => "noderejected".to_owned(),
+        }
+    }
+}
+
+impl UriDisplay<Query> for WithdrawalFilter {
+    fn fmt(&self, f: &mut Formatter<Query>) -> fmt::Result {
+        f.write_value(self.to_string().as_str())
+    }
+}
+
+impl<'a> FromUriParam<Query, &WithdrawalFilter> for WithdrawalFilter {
+    type Target = WithdrawalFilter;
+
+    fn from_uri_param(filt: &WithdrawalFilter) -> WithdrawalFilter {
+        filt.clone()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -591,12 +660,24 @@ pub struct GetTokensResponse {
     pub tokens: Vec<TokenInfo>,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, PartialEq, Eq, Deserialize, JsonSchema)]
 pub struct TokenInfo {
     pub token: Erc20Token,
     pub balance: u64,
     pub finalized_balance: u64,
     pub is_active: bool,
+}
+
+impl PartialOrd for TokenInfo {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.token.partial_cmp(&other.token)
+    }
+}
+
+impl Ord for TokenInfo {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.token.cmp(&other.token)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -639,14 +720,14 @@ pub struct Erc20HotWalletBalanceResponse {
     pub balance: Vec<Erc20Balance>,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, JsonSchema)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, JsonSchema)]
 pub enum LimitSpan {
     Day,
     Week,
     Month,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, JsonSchema)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, JsonSchema)]
 pub struct Limit {
     pub amount: u64,
     pub span: LimitSpan,
@@ -659,11 +740,46 @@ pub struct LimitChangeReq {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(tag = "type")]
 pub enum LimitChangeStatus {
     InProgress { confirmations: i16, rejections: i16 },
     Completed,
     Rejected,
 }
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy, JsonSchema, FromFormField)]
+pub enum LimitChangeFilter {
+    All,
+    Pending,
+    Completed,
+    Rejected
+}
+
+impl ToString for LimitChangeFilter {
+    fn to_string(&self) -> String {
+        match self {
+            LimitChangeFilter::All => "all".to_owned(),
+            LimitChangeFilter::Completed => "completed".to_owned(),
+            LimitChangeFilter::Rejected => "rejected".to_owned(),
+            LimitChangeFilter::Pending => "pending".to_owned()
+        }
+    }
+}
+
+impl UriDisplay<Query> for LimitChangeFilter {
+    fn fmt(&self, f: &mut Formatter<Query>) -> fmt::Result {
+        f.write_value(self.to_string().as_str())
+    }
+}
+
+impl<'a> FromUriParam<Query, &LimitChangeFilter> for LimitChangeFilter {
+    type Target = LimitChangeFilter;
+
+    fn from_uri_param(filt: &LimitChangeFilter) -> LimitChangeFilter {
+        filt.clone()
+    }
+}
+
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, JsonSchema)]
 pub struct LimitChangeResponse {
@@ -675,6 +791,8 @@ pub struct LimitChangeResponse {
     pub status: LimitChangeStatus,
 }
 
+// NOTE: fields order must be the same as in 'LimitConfirmationData' struct
+// otherwise signature verification will fail
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, JsonSchema)]
 pub struct LimitChangeOpResponse {
     pub id: Uuid,
@@ -686,7 +804,7 @@ pub struct LimitChangeOpResponse {
     pub status: LimitChangeStatus,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, JsonSchema)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Eq, JsonSchema)]
 pub struct LimitInfo {
     pub limit: Limit,
     pub spent: u64,
@@ -704,18 +822,32 @@ impl Default for LimitInfo {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, JsonSchema)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, JsonSchema)]
 pub struct LimitApiResp {
-    pub limit_info: LimitInfo,
     pub currency: Currency,
+    pub limit_info: LimitInfo,
 }
 
+impl PartialOrd for LimitApiResp {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.currency.partial_cmp(&other.currency)
+    }
+}
+
+impl Ord for LimitApiResp {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.currency.cmp(&other.currency)
+    }
+}
+
+// NOTE: fields order must be the same as in 'LimitChangeOpResponse' struct
+// otherwise signature verification will fail
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, JsonSchema)]
 pub struct LimitConfirmationData {
     pub id: Uuid,
     pub user: String,
-    pub currency: Currency,
     pub created_at: String,
+    pub currency: Currency,
     pub requested_limit: Limit,
 }
 
@@ -730,4 +862,103 @@ pub struct ConfigChangeRequest {
     pub email: Option<String>,
     pub phone: Option<String>,
     pub tg_name: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, JsonSchema)]
+pub struct ExchangeRequest {
+    pub currency_from: Currency,
+    pub currency_to: Currency,
+    pub amount_from: u64,
+    pub amount_to: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, JsonSchema)]
+#[serde(tag = "type")]
+pub enum ExchangeStatus {
+    Completed,
+    Rejected,
+    InProgress { confirmations: i16, rejections: i16 },
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, JsonSchema)]
+pub struct ExchangeOrder {
+    pub user: String,
+    pub id: Uuid,
+    pub currency_from: Currency,
+    pub currency_to: Currency,
+    pub amount_from: u64,
+    pub amount_to: u64,
+    pub created_at: String,
+    pub status: ExchangeStatus,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, JsonSchema)]
+pub struct ExchangeConfirmationData {
+    pub user: String,
+    pub id: Uuid,
+    pub currency_from: Currency,
+    pub currency_to: Currency,
+    pub amount_from: u64,
+    pub amount_to: u64,
+    pub created_at: String,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, JsonSchema, FromFormField, Copy)]
+pub enum ExchangeFilter {
+    All,
+    Pending,
+    Completed,
+    Rejected,
+}
+
+impl UriDisplay<Query> for ExchangeFilter {
+    fn fmt(&self, f: &mut Formatter<Query>) -> fmt::Result {
+        f.write_value(self.to_string().as_str())
+    }
+}
+
+impl ToString for ExchangeFilter {
+    fn to_string(&self) -> String {
+        match self {
+            ExchangeFilter::All => "all".to_owned(),
+            ExchangeFilter::Completed => "completed".to_owned(),
+            ExchangeFilter::Rejected => "rejected".to_owned(),
+            ExchangeFilter::Pending => "pending".to_owned(),
+        }
+    }
+}
+
+impl<'a> FromUriParam<Query, &str> for ExchangeFilter {
+    type Target = ExchangeFilter;
+
+    fn from_uri_param(filt: &str) -> ExchangeFilter {
+        match filt.to_lowercase().as_str() {
+            "all" => ExchangeFilter::All,
+            "completed" => ExchangeFilter::Completed,
+            "rejected" => ExchangeFilter::Rejected,
+            "pending" => ExchangeFilter::Pending,
+            _ => ExchangeFilter::All,
+        }
+    }
+}
+
+impl<'a> FromUriParam<Query, &ExchangeFilter> for ExchangeFilter {
+    type Target = ExchangeFilter;
+
+    fn from_uri_param(filt: &ExchangeFilter) -> ExchangeFilter {
+        filt.clone()
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, JsonSchema)]
+pub struct ExchangeBalanceItem {
+    pub currency: Currency,
+    pub balance: i64,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, JsonSchema)]
+pub struct ExchangeAddress {
+    pub currency: String,
+    pub address: String,
+    pub qr_code_base64: String,
 }

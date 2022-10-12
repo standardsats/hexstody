@@ -1,6 +1,6 @@
 use std::{sync::Arc, fmt::Debug};
 use base64;
-use hexstody_api::{types::{LimitApiResp, LimitChangeReq, LimitChangeResponse, ConfigChangeRequest}, domain::{Currency, Language, Email, PhoneNumber, TgName}};
+use hexstody_api::{types::{LimitApiResp, LimitChangeReq, LimitChangeResponse, ConfigChangeRequest, LimitChangeFilter}, domain::{Currency, Language, Email, PhoneNumber, TgName}};
 use rocket::{get, http::{CookieJar, Status}, State, serde::json::Json, response::Redirect, post};
 use rocket_okapi::openapi;
 use tokio::sync::{Mutex, mpsc};
@@ -16,11 +16,12 @@ pub async fn get_user_limits(
     state: &State<Arc<Mutex<DbState>>>,
 ) -> Result<Json<Vec<LimitApiResp>>, Redirect>{
     require_auth_user(cookies, state, |_, user| async move {
-        let infos = user.currencies.values().map(|cur_info| 
+        let mut infos: Vec<LimitApiResp> = user.currencies.values().map(|cur_info| 
             LimitApiResp{ 
                 limit_info: cur_info.limit_info.clone(), 
                 currency: cur_info.currency.clone() 
             }).collect();
+        infos.sort();
         Ok(Json(infos))
     }).await.map_err(|_| goto_signin())
 }
@@ -71,13 +72,18 @@ pub async fn request_new_limits(
 }
 
 #[openapi(skip)]
-#[get("/profile/limits/changes")]
+#[get("/profile/limits/changes?<filter>")]
 pub async fn get_user_limit_changes(
     cookies: &CookieJar<'_>,
     state: &State<Arc<Mutex<DbState>>>,
+    filter: Option<LimitChangeFilter>
 ) -> Result<Json<Vec<LimitChangeResponse>>, Redirect>{
+    let filter = filter.unwrap_or(LimitChangeFilter::All);
     require_auth_user(cookies, state, |_, user| async move {
-        let changes = user.limit_change_requests.values().map(|v| { v.clone().into() }).collect();
+        let changes = user.limit_change_requests
+            .values()
+            .filter_map(|v| if v.matches_filter(filter) { Some(v.clone().into()) } else {None})
+            .collect();
         Ok(Json(changes))
     }).await.map_err(|_| goto_signin())
 }

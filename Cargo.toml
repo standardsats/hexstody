@@ -9,8 +9,12 @@ members = [
     "hexstody-client",
     "hexstody-db",
     "hexstody-eth-client",
+    "hexstody-eth",
     "hexstody-operator",
     "hexstody-public",
     "hexstody-hot",
     "hexstody-sig",
+    "hexstody-ticker-provider",
+    "hexstody-ticker",
+    "hexstody-runtime-db",
 ]

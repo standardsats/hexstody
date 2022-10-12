@@ -5,6 +5,10 @@ pub mod wallet;
 
 use base64;
 use figment::Figment;
+use hexstody_db::state::Network;
+use hexstody_runtime_db::RuntimeState;
+use hexstody_ticker::api::ticker_api;
+use hexstody_ticker_provider::client::TickerClient;
 use qrcode_generator::QrCodeEcc;
 use std::fs::File;
 use std::io::Read;
@@ -36,8 +40,6 @@ use hexstody_eth_client::client::EthClient;
 use hexstody_sig::SignatureVerificationConfig;
 use profile::*;
 use wallet::*;
-
-use crate::state::RuntimeState;
 
 struct StaticPath(PathBuf);
 
@@ -249,10 +251,10 @@ async fn deposit(
             )
             .await?;
             let qr_code: Vec<u8> =
-                qrcode_generator::to_png_to_vec(deposit_address.to_string(), QrCodeEcc::Low, 256)
+                qrcode_generator::to_png_to_vec(deposit_address.address(), QrCodeEcc::Low, 256)
                     .unwrap();
             deposit_addresses.push(DepositInfo {
-                address: deposit_address.to_string(),
+                address: deposit_address.address(),
                 qr_code_base64: base64::encode(qr_code),
                 tab: user_currency.ticker_lowercase(),
                 currency: user_currency.to_string(),
@@ -367,24 +369,55 @@ async fn get_dict(
     .await
 }
 
+#[openapi(skip)]
+#[get("/swap")]
+async fn swap(
+    cookies: &CookieJar<'_>,
+    state: &State<Arc<Mutex<DbState>>>,
+    static_path: &State<StaticPath>,
+) -> Result<Template, Redirect> {
+    require_auth_user(cookies, state, |_, user| async move {
+        let header_dict = get_dict_json(
+            static_path.inner(),
+            user.config.language,
+            PathBuf::from_str("header.json").unwrap(),
+        )?;
+        let context = context! {
+            title:"swap",
+            parent: "base_with_header",
+            username: &user.username,
+            lang: context! {
+                lang: user.config.language.to_alpha().to_uppercase(),
+                header: header_dict,
+            }
+        };
+        Ok(Template::render("swap", context))
+    })
+    .await
+    .map_err(|_| goto_signin())
+}
+
 pub async fn serve_api(
     pool: Pool,
     state: Arc<Mutex<DbState>>,
+    runtime_state: Arc<Mutex<RuntimeState>>,
     _state_notify: Arc<Notify>,
     start_notify: Arc<Notify>,
     update_sender: mpsc::Sender<StateUpdate>,
     btc_client: BtcClient,
     eth_client: EthClient,
+    ticker_client: TickerClient,
     api_config: Figment,
     is_test: bool,
 ) -> Result<(), rocket::Error> {
-    let runtime_state = Arc::new(Mutex::new(RuntimeState::new()));
     let on_ready = AdHoc::on_liftoff("API Start!", |_| {
         Box::pin(async move {
             start_notify.notify_one();
         })
     });
     let static_path: PathBuf = api_config.extract_inner("static_path").unwrap();
+    let network: Network = api_config.extract_inner("network").unwrap();
+    let ticker_api = ticker_api();
     let _ = rocket::custom(api_config)
         .mount("/", FileServer::from(static_path.clone()))
         .mount(
@@ -393,7 +426,6 @@ pub async fn serve_api(
                 ping,
                 get_balance,
                 get_balance_by_currency,
-                ticker,
                 get_user_data,
                 ethfee,
                 btcfee,
@@ -419,9 +451,13 @@ pub async fn serve_api(
                 set_user_public_key,
                 get_challenge,
                 redeem_challenge,
-                get_deposit_address_handle
+                get_deposit_address_handle,
+                order_exchange,
+                list_my_orders,
+                get_network
             ],
         )
+        .mount("/ticker/", ticker_api)
         .mount(
             "/",
             routes![
@@ -431,7 +467,8 @@ pub async fn serve_api(
                 signup,
                 signin_page,
                 deposit,
-                withdraw
+                withdraw,
+                swap
             ],
         )
         .mount(
@@ -447,8 +484,10 @@ pub async fn serve_api(
         .manage(btc_client)
         .manage(eth_client)
         .manage(runtime_state)
+        .manage(ticker_client)
         .manage(IsTestFlag(is_test))
         .manage(StaticPath(static_path))
+        .manage(network)
         .attach(Template::fairing())
         .attach(AdHoc::config::<SignatureVerificationConfig>())
         .attach(on_ready)

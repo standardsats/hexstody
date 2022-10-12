@@ -6,5 +6,12 @@
     "address": "Address",
     "amount": "Amount",
     "max": "Max",
-    "send": "Send"
+    "send": "Send",
+    "in": "in",
+    "error": {
+        "invalidAddress": "Invalid address",
+        "invalidAmount": "Invalid amount",
+        "error": "Error",
+        "unknownCurrency": "Unknown crrency"
+    }
 }
